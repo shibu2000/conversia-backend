@@ -7,15 +7,15 @@
     "node": ">=20"
   },
   "scripts": {
-    "dev": "bunx tsx watch src/server.ts",
+    "dev": "tsx watch src/server.ts",
     "build": "tsc -p tsconfig.json",
-    "start": "bun dist/server.js",
+    "start": "node dist/server.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "db:create": "bunx tsx src/db/create-database.ts",
-    "db:migrate": "bunx tsx src/db/migrate.ts",
-    "db:reset": "bunx tsx src/db/reset.ts",
-    "db:seed": "bunx tsx src/db/seed/index.ts",
-    "db:setup": "bun run db:create && bun run db:migrate && bun run db:seed",
+    "db:create": "tsx src/db/create-database.ts",
+    "db:migrate": "tsx src/db/migrate.ts",
+    "db:reset": "tsx src/db/reset.ts",
+    "db:seed": "tsx src/db/seed/index.ts",
+    "db:setup": "npm run db:create && npm run db:migrate && npm run db:seed",
     "db:generate": "bunx drizzle-kit generate",
     "db:push": "bunx drizzle-kit push",
     "db:studio": "bunx drizzle-kit studio"
@@ -37,6 +37,7 @@
     "openai": "^7.15.0",
     "pg": "^8.13.1",
     "postgres": "^3.4.9",
+    "tsx": "^4.19.2",
     "unpdf": "^1.8.1",
     "zod": "^3.24.1"
   },
@@ -51,7 +52,6 @@
     "@types/node": "^22.10.2",
     "@types/pg": "^8.11.10",
     "drizzle-kit": "^0.31.10",
-    "tsx": "^4.19.2",
     "typescript": "^5.7.2"
   },
   "allowScripts": {
