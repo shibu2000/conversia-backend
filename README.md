@@ -1,13 +1,17 @@
 # Conversia API
 
 The backend for Conversia — a multi-tenant AI customer interaction, sales and
-support platform. This service owns everything the product does *except* the AI
-layer: tenancy, authentication, RBAC, customers, conversations, leads, tickets,
-products, FAQ, Knowledge Base document management, chatbot configuration,
-analytics, and the public chat-widget endpoints.
+support platform. It owns tenancy, authentication, RBAC, customers,
+conversations, leads, tickets, products, FAQ, Knowledge Base document
+management, chatbot configuration, analytics, the public chat-widget endpoints
+— and the AI layer itself: document processing, retrieval-augmented
+generation, and tool calling, behind a provider-agnostic interface. Chat and
+embeddings each work against Ollama (local) or a cloud vendor, switchable
+through configuration alone, with no call-site change.
 
-**The AI layer is deliberately not implemented.** See
-[What is left to the AI layer](#what-is-left-to-the-ai-layer).
+**Two capabilities remain genuinely unbuilt**, honestly, rather than stubbed:
+website crawling for the setup wizard, and the AI-usage analytics panel. See
+[The AI layer](#the-ai-layer).
 
 ---
 
@@ -281,49 +285,87 @@ audit trail as anyone else's.
 
 ---
 
-## What is left to the AI layer
+## The AI layer
 
-`src/ai/ai-gateway.ts` declares the interface and nothing else. The default
-implementation throws `501 ai_layer_not_implemented` for every capability.
+`src/ai/` implements `AIGateway` (declared in `src/ai/ai-gateway.ts`) and is
+registered at boot from `server.ts` whenever the environment configures a
+provider — `aiConfigured()` gates it, so an unconfigured deployment behaves
+exactly as it did before the layer existed, not part-broken: every AI-backed
+endpoint falls back to its honest "not available" branch instead of a stub
+answer.
 
-Not implemented, by design:
+**Document processing** (`src/ai/extract/`, `src/ai/chunking/`,
+`src/ai/indexing/`) — extracts text from PDF, DOCX and HTML uploads, splits it
+into coherence-sized chunks that respect headings and paragraph structure
+rather than fixed-length slices, and embeds each one. An indexing worker
+claims pending documents with `FOR UPDATE SKIP LOCKED` and a stale-lease
+reclaim, and writes real pipeline progress as it runs — the document view
+renders that log verbatim.
 
-- document text extraction, chunking and embedding
-- vector storage and semantic retrieval (RAG)
-- LLM orchestration, prompting, streaming
-- tool calling and agent loops
-- intent classification and confidence scoring
-- website crawling and AI-suggested onboarding content
+**Retrieval** (`src/ai/retrieval/`) — pgvector-backed hybrid search: a semantic
+pass and a lexical (full-text) pass combined by reciprocal rank fusion, sorted
+by true cosine similarity for the threshold and the UI. Every query is scoped
+to `companyId` and to the collections a chatbot config has actually enabled —
+no cross-tenant leakage, no answer sourced from a collection the workspace
+withheld.
 
-A stub that returned a keyword match dressed up as a similarity score, or a
-canned paragraph presented as a generated answer, would make the product look
-finished while lying about what it does. The endpoints that depend on the AI
-layer say so instead:
+**Answering** (`src/ai/answer/`) — one model call decides the whole turn:
+whether the message is small talk, whether a curated FAQ answer already covers
+it, whether the customer wants something *done* (a tool runs), or whether to
+answer from retrieved passages — and declines honestly (`needs_ai_backend`)
+when none of those apply. This replaced an earlier regex-based router that
+could not tell "tell me about the bike light" from "the bike light I received
+is damaged" apart — the same words, opposite intent, and no lexical rule draws
+that line.
 
-| Endpoint                              | Behaviour without the AI layer                  |
-| ------------------------------------- | ----------------------------------------------- |
-| `POST /knowledge/retrieval-test`       | `answered: false` + a reason naming the gap     |
-| `GET /analytics/ai`                    | `501` — every figure measures the AI layer      |
-| `POST /wizard/analyze-website`         | `501`                                           |
-| `POST /widget/:key/ask`                | `needs_ai_backend` when FAQ and catalogue miss  |
-| Knowledge documents                    | stay `pending`; `vectorCount` stays 0           |
+**Tool calling** (`src/ai/tools/`) — `search_product` (read-only), and
+`create_lead` / `create_ticket` (write), which gather name, email or phone
+through the conversation first when the record needs it rather than inventing
+contact details.
+
+**Providers** (`src/ai/providers/`) — chat and embeddings are configured
+independently, since real vendors are routinely single-purpose: a chat
+aggregator with no embeddings endpoint, an embeddings specialist with no chat
+endpoint. Supported today: **Ollama** (local, both capabilities), any
+**OpenAI-compatible** endpoint for chat (OpenAI itself, or an aggregator such
+as xKiro), and **Voyage AI** for embeddings. Switching is `AI_CHAT_PROVIDER` /
+`AI_EMBEDDING_PROVIDER` and their `_BASE_URL` / `_API_KEY` overrides in
+`.env` — never a code change; see `.env.example` for the combinations. The
+embedding column's width follows `AI_EMBEDDING_DIMENSIONS` automatically on a
+fresh database (`src/db/ensure-embedding-dimensions.ts`); on an established one
+with real embeddings stored, a provider change is refused automatically
+instead of silently corrupting retrieval, and needs the reviewed
+migrate-and-reindex path instead.
 
 **What is already real and needs no AI:** FAQ search (Postgres full-text over
 curated answers), product search, lead and ticket creation, assignment,
-notifications, analytics over actual rows, and every workflow the widget drives
-— including the conversation itself. Every widget exchange is written to
-`conversations` and `messages` as it happens, so the inbox shows what real
-visitors actually said, a handoff lands in the agent queue, and a lead or ticket
-raised from a chat links back to the thread it came out of.
+notifications (including email on a new lead), analytics over actual rows, and
+every workflow the widget drives — including the conversation itself. Every
+widget exchange is written to `conversations` and `messages` as it happens, so
+the inbox shows what real visitors actually said, a handoff lands in the agent
+queue, and a lead or ticket raised from a chat links back to the thread it came
+out of.
 
 A widget conversation starts anonymous: `conversations.customer_id` is null
 until the visitor submits a lead or a ticket, at which point the thread is
 attached to that customer. Creating a placeholder customer per visitor would
 fill the directory with empty records from bounces and bots.
 
-To add the layer: implement `AIGateway` and call `registerAIGateway()` at boot.
-No call site changes. **See [AI-LAYER.md](./AI-LAYER.md)** for the method-by-method
-guide, and `src/ai/example/gateway.example.ts` for a skeleton to copy.
+**Two capabilities remain genuinely unbuilt**, and throw
+`501 ai_layer_not_implemented` rather than return placeholder data — a screen
+of zeroes reads as "the assistant answered nothing," not "there is no
+assistant yet," and a company relying on this product needs to tell those
+apart:
+
+| Endpoint                       | Behaviour                                                          |
+| ------------------------------- | -------------------------------------------------------------------- |
+| `POST /wizard/analyze-website`  | `501` — website crawling and AI-suggested onboarding content         |
+| `GET /analytics/ai`             | `501` — the panel would measure AI usage this endpoint doesn't record yet |
+
+To implement either: add the method on `ConversiaAIGateway`
+(`src/ai/gateway.ts`), matching the contract already declared on `AIGateway`
+(`src/ai/ai-gateway.ts`). No other call site changes. **See
+[AI-LAYER.md](./AI-LAYER.md)** for what each method still owes.
 
 ---
 
